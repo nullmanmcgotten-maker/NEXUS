@@ -1,29 +1,35 @@
-# NEXUS Trading Engine
+# NEXUS live trading engine
 
-This repository now contains a practical Python trading-engine skeleton designed around the rules you outlined:
-- market-regime pipeline
-- liquidity / order-flow checks
-- risk and trade approval
-- execution quality gates
-- trade journaling
+This repository is a live-data-first engine for Binance Futures. It does not include demo mode, paper trading, or placeholder simulation flows.
 
-Use it for research, backtesting, paper trading, and validation. Do not run it live without a proper broker adapter, real-time data validation, and exchange reconciliation.
+What is included:
+- Binance Futures REST adapter for market data and account access
+- risk governor with risk caps and kill switches
+- execution manager with strict live-order gating
+- engine loop that validates connectivity and approves or rejects a trade
+- environment-driven configuration
 
-## Quick start
+Important:
+- live trading is disabled by default
+- you must supply Binance API keys and explicit environment flags
+- production execution requires exchange permissions, position sizing controls, and final validation
+
+## Required env vars
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python main.py
+export BINANCE_API_KEY="your_key"
+export BINANCE_API_SECRET="your_secret"
+export NEXUS_SYMBOL="BTCUSDT"
+export NEXUS_ACCOUNT_CAPITAL="10000"
+export NEXUS_MAX_RISK_PER_TRADE="0.004"
+export NEXUS_ENABLE_LIVE_ORDERS="false"
+export BINANCE_TESTNET="false"
 ```
 
-The sample script creates a synthetic market snapshot and prints a trade decision.
+## Run the live engine
 
-## Recommended next steps
+```bash
+python live_main.py
+```
 
-1. Add a real market-data adapter (exchange websocket or REST).
-2. Replace synthetic snapshots with live candles and order book data.
-3. Add a replay engine and event-based backtester.
-4. Add Telegram/webhook alerts and risk controls.
-5. Move from paper-trading to a broker-integrated execution layer.
+This does not place orders unless `NEXUS_ENABLE_LIVE_ORDERS=true` and the credentials are valid.
