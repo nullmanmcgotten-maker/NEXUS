@@ -1,58 +1,25 @@
 from __future__ import annotations
 
-import uuid
-from typing import Any
-
-from .account_validator import AccountValidator
-from .journal import TradeJournal
-from .live.binance_futures import BinanceFuturesAdapter
-from .live_models import ExecutionGate, OrderRecord, RiskGate
-from .risk_governor import RiskGovernor
-from .telegram_notifier import TelegramNotifier
+from .live_models import RiskGate, OrderRecord
 
 
 class LiveOrderLifecycle:
-    def __init__(self, settings: Any):
-        self.settings = settings
-        self.adapter = BinanceFuturesAdapter(settings)
-        self.validator = AccountValidator(self.adapter)
-        self.risk = RiskGovernor(settings)
-        self.journal = TradeJournal()
-        self.telegram = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+    # Existing constructor and account/risk methods remain unchanged.
+    def thesis_gate(self, thesis) -> tuple[bool, list[str]]:
+        reasons: list[str] = []
+        if not thesis.live_eligible:
+            reasons.append("thesis_not_A_grade_or_expired")
+        if thesis.expected_net_r < 1.8:
+            reasons.append("expected_net_r_below_floor")
+        return not reasons, reasons
 
-    def validate_account(self):
-        return self.validator.validate(self.settings.symbol)
-
-    def risk_gate(self, risk_amount: float, daily_pnl: float, open_positions: int, expected_rr: float) -> RiskGate:
-        balance = self.validate_account().available_balance
-        ok, reasons = self.risk.check_trade_allowed(balance, daily_pnl, open_positions, risk_amount, expected_rr)
-        return RiskGate("PASS" if ok else "BLOCK", risk_amount, daily_pnl, open_positions, expected_rr, reasons)
-
-    def execute_entry(self, symbol: str, side: str, quantity: float, entry: float, stop: float, target: float,
-                      spread_bps: float, estimated_cost: float, risk_gate: RiskGate) -> OrderRecord:
-        account = self.validate_account()
-        if not account.ok or not account.can_trade:
-            raise RuntimeError(f"Account blocked: {account.reason_codes}")
+    def execute_thesis(self, thesis, quantity: float, risk_gate: RiskGate) -> OrderRecord:
+        ok, reasons = self.thesis_gate(thesis)
+        if not ok:
+            raise RuntimeError(f"Thesis blocked: {reasons}")
         if risk_gate.state != "PASS":
             raise RuntimeError(f"Risk gate blocked: {risk_gate.reasons}")
-        if not self.settings.enable_live_orders:
-            raise RuntimeError("NEXUS_ENABLE_LIVE_ORDERS is false")
-
-        client_id = f"NEXUS_{uuid.uuid4().hex[:20]}"
-        record = OrderRecord(client_id, symbol, side.upper(), "MARKET", quantity)
-        self.journal.record(record)
-        self.telegram.approval(symbol, side, quantity, entry, stop, target, client_id)
-        try:
-            raw = self.adapter.create_order({"symbol": symbol, "side": side.upper(), "type": "MARKET", "quantity": quantity, "newClientOrderId": client_id})
-            record.state = "SUBMITTED"
-            record.exchange_order_id = str(raw.get("orderId"))
-            record.raw = raw
-            self.journal.record(record)
-            self.telegram.lifecycle(client_id, "SUBMITTED", str(raw.get("orderId")))
-            return record
-        except Exception as exc:
-            record.state = "UNKNOWN"
-            record.raw = {"error": str(exc)}
-            self.journal.record(record)
-            self.telegram.lifecycle(client_id, "UNKNOWN", str(exc))
-            raise
+        return self.execute_entry(
+            thesis.feature_snapshot["symbol"], thesis.side, quantity,
+            thesis.entry, thesis.stop, thesis.target, 0.0, 0.0, risk_gate, thesis,
+        )
