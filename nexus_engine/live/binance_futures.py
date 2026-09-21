@@ -1,137 +1,65 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode
 
 import requests
 
-from .config import Settings
+from ..config import Settings
 
 
 class BinanceFuturesAdapter:
-    """Live Binance Futures adapter using REST endpoints for market data and account access."""
+    """Signed Binance USD-M Futures REST adapter."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.session = requests.Session()
-        self.base_url = settings.binance_base_url
-        if settings.binance_testnet:
-            self.base_url = "https://testnet.binancefuture.com"
+        self.base_url = "https://testnet.binancefuture.com" if settings.binance_testnet else settings.binance_base_url
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        resp = self.session.get(f"{self.base_url}{path}", params=params, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
+    def _request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, signed: bool = False) -> Any:
+        params = dict(params or {})
+        headers: dict[str, str] = {}
+        if signed:
+            if not self.settings.binance_api_key or not self.settings.binance_api_secret:
+                raise ValueError("Binance API credentials are required")
+            params.setdefault("timestamp", int(time.time() * 1000))
+            params.setdefault("recvWindow", 5000)
+            query = urlencode(params, doseq=True)
+            params["signature"] = hmac.new(self.settings.binance_api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+            headers["X-MBX-APIKEY"] = self.settings.binance_api_key
+        response = self.session.request(method, f"{self.base_url}{path}", params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        return response.json()
 
     def ping(self) -> bool:
         try:
-            self._get("/fapi/v1/ping")
+            self._request("GET", "/fapi/v1/ping")
             return True
-        except Exception:
+        except requests.RequestException:
             return False
 
-    def fetch_ticker(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        return self._get(
-            "/fapi/v1/ticker/24hr",
-            params={"symbol": symbol or self.settings.symbol},
-        )
+    def fetch_account(self) -> dict[str, Any]:
+        return self._request("GET", "/fapi/v2/account", signed=True)
 
-    def fetch_book_ticker(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        return self._get(
-            "/fapi/v1/ticker/bookTicker",
-            params={"symbol": symbol or self.settings.symbol},
-        )
+    def fetch_exchange_info(self) -> dict[str, Any]:
+        return self._request("GET", "/fapi/v1/exchangeInfo")
 
-    def fetch_mark_price(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        return self._get(
-            "/fapi/v1/premiumIndex",
-            params={"symbol": symbol or self.settings.symbol},
-        )
+    def fetch_open_orders(self, symbol: Optional[str] = None) -> list[dict[str, Any]]:
+        return self._request("GET", "/fapi/v1/openOrders", {"symbol": symbol} if symbol else {}, signed=True)
 
-    def fetch_klines(self, interval: str = "15m", limit: int = 200, symbol: Optional[str] = None):
-        return self._get(
-            "/fapi/v1/klines",
-            params={
-                "symbol": symbol or self.settings.symbol,
-                "interval": interval,
-                "limit": limit,
-            },
-        )
+    def fetch_order(self, symbol: str, order_id: Optional[int] = None, client_order_id: Optional[str] = None) -> dict[str, Any]:
+        params: dict[str, Any] = {"symbol": symbol}
+        if order_id is not None:
+            params["orderId"] = order_id
+        if client_order_id:
+            params["origClientOrderId"] = client_order_id
+        return self._request("GET", "/fapi/v1/order", params, signed=True)
 
-    def fetch_account_balance(self) -> Dict[str, Any]:
-        if not self.settings.binance_api_key or not self.settings.binance_api_secret:
-            raise ValueError("BINANCE_API_KEY and BINANCE_API_SECRET must be set to fetch account state.")
+    def create_order(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/fapi/v1/order", params, signed=True)
 
-        # Use signed request with HMAC SHA256 for futures account data.
-        # This is intentionally strict; the live adapter should validate and log before any order placement.
-        from hashlib import sha256
-        from hmac import new as hmac_new
-        import time
-        from urllib.parse import urlencode
-
-        query = {
-            "timestamp": int(time.time() * 1000),
-            "recvWindow": 60000,
-        }
-        query_string = urlencode(query)
-        signature = hmac_new(
-            self.settings.binance_api_secret.encode("utf-8"),
-            query_string.encode("utf-8"),
-            sha256,
-        ).hexdigest()
-
-        headers = {"X-MAX-APIKEY": self.settings.binance_api_key}
-        resp = self.session.get(
-            f"{self.base_url}/fapi/v2/account",
-            params={**query, "signature": signature},
-            headers=headers,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def create_order(
-        self,
-        side: str,
-        quantity: float,
-        order_type: str = "MARKET",
-        symbol: Optional[str] = None,
-        reduce_only: bool = False,
-        price: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        if not self.settings.binance_api_key or not self.settings.binance_api_secret:
-            raise ValueError("BINANCE_API_KEY and BINANCE_API_SECRET must be set to place orders.")
-
-        from hashlib import sha256
-        from hmac import new as hmac_new
-        import time
-        from urllib.parse import urlencode
-
-        payload = {
-            "symbol": symbol or self.settings.symbol,
-            "side": side.upper(),
-            "type": order_type.upper(),
-            "quantity": quantity,
-            "timestamp": int(time.time() * 1000),
-            "recvWindow": 60000,
-        }
-        if reduce_only:
-            payload["reduceOnly"] = "true"
-        if price is not None:
-            payload["price"] = round(price, 2)
-
-        query_string = urlencode(payload)
-        signature = hmac_new(
-            self.settings.binance_api_secret.encode("utf-8"),
-            query_string.encode("utf-8"),
-            sha256,
-        ).hexdigest()
-
-        headers = {"X-MAX-APIKEY": self.settings.binance_api_key}
-        resp = self.session.post(
-            f"{self.base_url}/fapi/v1/order",
-            params={**payload, "signature": signature},
-            headers=headers,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    def cancel_order(self, symbol: str, order_id: int) -> dict[str, Any]:
+        return self._request("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id}, signed=True)
