@@ -1,0 +1,4 @@
+# Trading engine runtime dependencies
+# Keep this intentionally small and transparent.
+
+pydantic>=2.7.0
